@@ -1,0 +1,11 @@
+{
+  "system": "pg_duckdb",
+  "proprietary": "no",
+  "hardware": "cpu",
+  "tuned": "no",
+  "tags": [
+    "column-oriented",
+    "DuckDB derivative",
+    "PostgreSQL compatible"
+  ]
+}

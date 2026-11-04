@@ -1,0 +1,13 @@
+{
+  "system": "DuckDB (Parquet, single)",
+  "proprietary": "no",
+  "hardware": "cpu",
+  "tuned": "no",
+  "tags": [
+    "C++",
+    "column-oriented",
+    "DuckDB derivative",
+    "embedded",
+    "stateless"
+  ]
+}

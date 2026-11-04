@@ -1,72 +1,21 @@
-machine='t3a.small'; clickhouse-client --query "
+#!/bin/bash
 
-SELECT system FROM (
-
-WITH
-    extract(content, 'System: ([^\n]+)') AS system,
-    extract(content, 'Machine: ([^\n]+)') AS machine,
-
-    toUInt64OrZero(extract(content, 'Disk usage after: (\d+)')) - toUInt64OrZero(extract(content, 'Disk usage before: (\d+)')) AS disk_space_diff,
-    toUInt64OrZero(extract(content, 'Total time: (\d+)')) AS total_time,
-
-    match(content, 'Load time:\s*(?:COPY \d+\n)?(\d+)') ? arraySum(x -> toFloat64(x), extractAll(content, 'Load time:\s*(?:COPY \d+\n)?(\d+)')) : NULL AS load_time,
-    match(content, 'Data size: *(\d+)') ? arraySum(x -> toUInt64(x), extractAll(content, 'Data size: *(\d+)')) : NULL AS data_size,
-
-    extractAllGroups(content, '\n *\[([\d\.]+|null),\s*([\d\.]+|null),\s*([\d\.]+|null)\]') AS runtimes,
-
-    load_time IS NOT NULL AND length(runtimes) = 43 AND data_size >= 5000000000
-        AND arrayExists(x -> arrayExists(y -> toFloat64OrZero(y) > 1, x), runtimes) AS good
-
-SELECT time, system, machine, total_time, disk_space_diff, load_time, data_size, length(runtimes), runtimes
-FROM sink.data
-WHERE time >= today() - 2 AND content NOT LIKE 'Cloud-init%' AND good AND machine = '${machine}'
-ORDER BY time DESC LIMIT 1 BY system
-
-)
-
-" | while read system; do echo $system; clickhouse-local --query "
-
-WITH file('${system}/results/c6a.4xlarge.json') AS template
-
-SELECT '{
-    \"system\": ' || visitParamExtractRaw(template, 'system') || ',
-    \"date\": \"' || time::Date || '\",
-    \"machine\": \"' || machine || '\",
-    \"cluster_size\": 1,
-    \"proprietary\": ' || visitParamExtractRaw(template, 'proprietary') || ',
-    \"tuned\": ' || visitParamExtractRaw(template, 'tuned') || ',
-    \"tags\": ' || visitParamExtractRaw(template, 'tags') || ',
-    \"load_time\": ' || load_time || ',
-    \"data_size\": ' || data_size || ',
-    \"result\": ' || runtimes_formatted || '
-}
-'
-
-FROM (
-
-WITH
-    extract(content, 'System: ([^\n]+)') AS system,
-    extract(content, 'Machine: ([^\n]+)') AS machine,
-
-    toUInt64OrZero(extract(content, 'Disk usage after: (\d+)')) - toUInt64OrZero(extract(content, 'Disk usage before: (\d+)')) AS disk_space_diff,
-    toUInt64OrZero(extract(content, 'Total time: (\d+)')) AS total_time,
-
-    match(content, 'Load time:\s*(?:COPY \d+\n)?(\d+)') ? arraySum(x -> toFloat64(x), extractAll(content, 'Load time:\s*(?:COPY \d+\n)?(\d+)')) : NULL AS load_time,
-    match(content, 'Data size: *(\d+)') ? arraySum(x -> toUInt64(x), extractAll(content, 'Data size: *(\d+)')) : NULL AS data_size,
-
-    extractAllGroups(content, '\n *\[([\d\.]+|null),\s*([\d\.]+|null),\s*([\d\.]+|null)\]') AS runtimes,
-    '[\n' || arrayStringConcat(arrayMap(x -> '        [' || arrayStringConcat(arrayMap(v -> v == 'null' ? v : round(v::Float64, 3)::String, x), ', ') || ']', runtimes), ',\n') || '\n]' AS runtimes_formatted,
-
-    load_time IS NOT NULL AND length(runtimes) = 43 AND data_size >= 5000000000
-        AND arrayExists(x -> arrayExists(y -> toFloat64OrZero(y) > 1, x), runtimes) AS good
-
-SELECT time, system, machine, total_time, disk_space_diff, load_time, data_size, length(runtimes), runtimes, runtimes_formatted
-FROM remote('127.0.0.2', sink.data)
-WHERE time >= today() - 2 AND content NOT LIKE 'Cloud-init%' AND good AND machine = '${machine}' AND system = '${system}'
-ORDER BY time DESC LIMIT 1
-)
-
-INTO OUTFILE '${system}/results/${machine}.json' TRUNCATE
-FORMAT RawBLOB
-
-"; done
+# Writes one JSON per (system, machine) under <system>/results/<YYYYMMDD>/<machine>.json,
+# where YYYYMMDD is taken from the recorded UTC time of the result.
+#
+# `LIMIT 1 BY system, machine` without an explicit `ORDER BY` returned an
+# arbitrary row per (system, machine) — for systems with several runs in
+# the past week, that picked an older row's date for the output directory
+# while the inner `ORDER BY time DESC LIMIT 1` still wrote the latest
+# content. The result was JSON files landing in the wrong dated subdir
+# and `generate-results.sh` never seeing today's entries. Order
+# explicitly so LIMIT 1 BY keeps the latest row for each pair.
+# clickbench_pr = 0 keeps runs launched for pull requests out of the
+# published results - they are for the PR's review, not for the website.
+clickhouse-client $CONNECTION_PARAMS --query "
+SELECT format(\$\$
+    SELECT output FROM sink.results WHERE system = '{0}' AND machine = '{1}' AND clickbench_pr = 0 ORDER BY time DESC LIMIT 1
+    INTO OUTFILE '{0}/results/{2}/{1}.json' TRUNCATE FORMAT Raw SETTINGS into_outfile_create_parent_directories = 1;
+\$\$, system, machine, formatDateTime(time, '%Y%m%d', 'UTC')) FROM sink.results
+WHERE time >= today() - INTERVAL 2 DAY AND clickbench_pr = 0 AND system NOT LIKE '%\\'%' ORDER BY time DESC LIMIT 1 BY system, machine FORMAT Raw
+" | clickhouse-client $CONNECTION_PARAMS

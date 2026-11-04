@@ -1,0 +1,15 @@
+{
+  "system": "DuckDB (DataFrame)",
+  "proprietary": "no",
+  "hardware": "cpu",
+  "tuned": "no",
+  "tags": [
+    "C++",
+    "column-oriented",
+    "DuckDB derivative",
+    "embedded",
+    "Python",
+    "dataframe",
+    "in-memory"
+  ]
+}

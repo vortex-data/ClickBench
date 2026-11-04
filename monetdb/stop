@@ -1,0 +1,5 @@
+#!/bin/bash
+
+# monetdbd refuses to run as root since 11.55, for `stop` too, so this
+# has to go through the `monetdb` user like install/start do.
+sudo -u monetdb monetdbd stop /var/monetdb5/dbfarm 2>/dev/null || true

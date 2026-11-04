@@ -1,0 +1,12 @@
+{
+  "system": "ParadeDB",
+  "proprietary": "no",
+  "hardware": "cpu",
+  "tuned": "no",
+  "tags": [
+    "Rust",
+    "row-oriented",
+    "search",
+    "PostgreSQL compatible"
+  ]
+}

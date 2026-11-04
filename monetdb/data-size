@@ -1,0 +1,6 @@
+#!/bin/bash
+set -eu
+
+# The dbfarm is the packaged/systemd default, /var/monetdb5/dbfarm —
+# not /var/lib/monetdb, which is just the `monetdb` user's home.
+sudo du -bcs /var/monetdb5/dbfarm | grep total | awk '{print $1}'

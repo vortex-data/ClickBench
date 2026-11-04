@@ -1,0 +1,10 @@
+{
+  "system": "OctoSQL",
+  "proprietary": "no",
+  "hardware": "cpu",
+  "tuned": "no",
+  "tags": [
+    "Go",
+    "stateless"
+  ]
+}

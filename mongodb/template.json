@@ -1,0 +1,11 @@
+{
+  "system": "MongoDB",
+  "proprietary": "no",
+  "hardware": "cpu",
+  "tuned": "no",
+  "tags": [
+    "row-oriented",
+    "document",
+    "C++"
+  ]
+}

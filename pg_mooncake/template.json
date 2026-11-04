@@ -1,0 +1,12 @@
+{
+  "system": "pg_mooncake",
+  "proprietary": "no",
+  "hardware": "cpu",
+  "tuned": "no",
+  "tags": [
+    "C",
+    "column-oriented",
+    "DuckDB derivative",
+    "PostgreSQL compatible"
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "system": "Daft (Parquet, partitioned)",
+  "proprietary": "no",
+  "hardware": "cpu",
+  "tuned": "no",
+  "tags": [
+    "Rust",
+    "stateless",
+    "embedded",
+    "in-memory"
+  ]
+}

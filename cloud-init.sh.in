@@ -1,65 +1,122 @@
 #!/bin/bash -x
 
-# This is the script for cloud-init, to run on a VM in unattended fashion. Example:
-<<///
-sed 's/@system@/clickhouse/' < cloud-init.sh.in > cloud-init.sh
-aws ec2 run-instances --count 1 --image-id ami-02003f9f0fde924ea --instance-type c6a.4xlarge \
-  --block-device-mappings 'DeviceName=/dev/sda1,Ebs={DeleteOnTermination=true,VolumeSize=500,VolumeType=gp2}' \
-  --security-group-ids sg-013790293e9640422 --instance-initiated-shutdown-behavior terminate \
-  --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=clickbench}]' \
-  --user-data file://cloud-init.sh
-///
+# This is the script for cloud-init, to run on a VM in unattended fashion. See run-benchmark.sh
+
+# Make sure the machine terminates whatever happens to this script: a deadline
+# that systemd enforces even if the script hangs (a stalled download or upload,
+# or a background server holding the pipe of `timeout ... | tee` open) or is
+# killed, and a trap for early exits. The `shutdown now` at the end replaces
+# the deadline in the normal case.
+shutdown -P "+$(( @timeout@ / 60 + 120 ))"
+trap 'shutdown now' EXIT
+
+# Cloud-init runs scripts as root with no HOME exported. Tools that follow
+# XDG-ish conventions (DuckDB extensions in ~/.duckdb, the GizmoSQL one-line
+# installer that runs `sh -u`, etc.) then fall over with messages like
+# `Can't find the home directory at ''` or `HOME: parameter not set`. Set it
+# once here so every per-system install/start/load/query inherits it.
+export HOME="${HOME:-/root}"
+
+# c6a.4xlarge has 32 GB RAM with no swap. Loading the 75 GB hits.tsv into
+# row-oriented databases (mysql, mariadb, postgres, mongodb, cratedb) and
+# in-process Python servers (pandas/polars/duckdb-dataframe) fills RAM
+# during ingest, and earlyoom (or the kernel OOM killer) then takes the
+# DB out and the run dies with `Lost connection during query`. A 16 GB
+# swapfile gives those loads the headroom they need without affecting
+# query-time numbers (queries don't touch swap once the data is hot).
+if [ ! -f /swapfile ]; then
+    fallocate -l 16G /swapfile
+    chmod 600 /swapfile
+    mkswap /swapfile >/dev/null
+    swapon /swapfile
+fi
+
+# The root filesystem is grown from the image's few GB to the whole 500 GB
+# disk during this first boot, and ext4 then zeroes the inode tables of the
+# new space in the background: 16.5 GB written by the ext4lazyinit kernel
+# thread over the first minutes of uptime. Its pace is a per-boot lottery (a
+# fixed pause of 10x the time the first block group happened to take), and a
+# fast draw takes most of the gp2 volume's throughput budget between queries,
+# so the cold run of a system whose dataset is quick to download (the
+# partitioned Parquet files land in seconds) starts with the burst allowance
+# only partly refilled and reads at the sustained rate for longer. Stop the
+# zeroing before the benchmark: the inode tables stay valid unzeroed (this is
+# the documented use of noinit_itable, and a fresh EBS volume reads as zeros
+# anyway), and the machine is terminated at the end of the run.
+mount -o remount,noinit_itable /
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
-apt-get install -y wget curl git
+apt-get install -y wget curl git jq earlyoom
 
-git clone --depth 1 https://github.com/ClickHouse/ClickBench.git
+systemctl enable --now earlyoom
+
+git clone --depth 1 'https://github.com/@repo@.git' --branch '@branch@' ClickBench
 cd ClickBench/@system@
-echo -n 'Disk usage before: ' >> log
-df -B1 / | tail -n1 | awk '{ print $3 }' >> log
-./benchmark.sh 2>&1 | tee -a log
-echo -n 'Disk usage after: ' >> log
-df -B1 / | tail -n1 | awk '{ print $3 }' >> log
-echo 'System: @system@' >> log
-echo -n 'Machine: ' >> log
-curl -sS -H "X-aws-ec2-metadata-token: $(curl -X PUT "http://169.254.169.254/latest/api/token" -sS -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")" 'http://169.254.169.254/latest/meta-data/instance-type' >> log
-echo >> log
-echo "Total time: $SECONDS" >> log
-du -b --max-depth=2 >> log
+
+# The log will be sent to ClickHouse and processed then by materialized views:
+
+echo -n 'System name: ' | tee -a log
+jq -r '.system' template.json | tee -a log
+echo -n 'Proprietary: ' | tee -a log
+jq -r '.proprietary' template.json | tee -a log
+echo -n 'Tuned: ' | tee -a log
+jq -r '.tuned' template.json | tee -a log
+echo -n 'Tags: ' | tee -a log
+jq -c -r '.tags' template.json | tee -a log
+
+# The pull request number when launched by the PR workflow, empty otherwise,
+# so that results of PR runs can be told apart from the runs of main.
+echo 'ClickBench PR: @clickbench_pr@' | tee -a log
+
+echo -n 'Disk usage before: ' | tee -a log
+df -B1 / | tail -n1 | awk '{ print $3 }' | tee -a log
+
+# 20000s (~5.5h) wasn't enough for slow OLTP-style systems (mysql,
+# mariadb, postgresql{,-indexed,-orioledb}, mongodb, cratedb, sqlite,
+# turso, timescaledb-no-columnstore, mysql-myisam) — they hit the
+# timeout mid-load or a few queries in. 36000s (10h) clears the
+# observed worst case while still capping a runaway run. Override at
+# render time on the operator side by exporting `timeout` before
+# run-benchmark.sh.
+timeout @timeout@ ./benchmark.sh 2>&1 | tee -a log
+
+echo -n 'Disk usage after: ' | tee -a log
+df -B1 / | tail -n1 | awk '{ print $3 }' | tee -a log
+echo 'System: @system@' | tee -a log
+echo -n 'Machine: ' | tee -a log
+curl -sS -H "X-aws-ec2-metadata-token: $(curl -X PUT "http://169.254.169.254/latest/api/token" -sS -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")" 'http://169.254.169.254/latest/meta-data/instance-type' | tee -a log
+echo | tee -a log
+echo "Total time: $SECONDS" | tee -a log
 
 # Save the results.
-# Prepare the database as follows:
-<<///
-CREATE DATABASE sink;
-
-CREATE TABLE sink.data
-(
-    time DateTime MATERIALIZED now(),
-    content String,
-    CONSTRAINT length CHECK length(content) < 1024 * 1024
-)
-ENGINE = ReplicatedMergeTree('/clickhouse/tables/sink/data/{shard}', '{replica}') PRIMARY KEY ();
-
-CREATE USER sink IDENTIFIED WITH no_password
-DEFAULT DATABASE sink
-SETTINGS
-    async_insert = 1 READONLY,
-    max_query_size = '10M' READONLY;
-
-CREATE QUOTA sink
-KEYED BY ip_address
-FOR RANDOMIZED INTERVAL 1 MINUTE MAX query_inserts = 10, written_bytes = 10000000,
-FOR RANDOMIZED INTERVAL 1 HOUR MAX query_inserts = 50, written_bytes = 50000000,
-FOR RANDOMIZED INTERVAL 1 DAY MAX query_inserts = 500, written_bytes = 200000000
-TO sink;
-
-GRANT INSERT ON sink.data TO sink;
-///
+# First, prepare the database as in prepare-database.sql
 
 RESULTS_URL="https://play.clickhouse.com/?user=sink&query=INSERT+INTO+data+FORMAT+RawBLOB"
 
-curl ${RESULTS_URL} --data-binary @log
-curl ${RESULTS_URL} --data-binary @/var/log/cloud-init-output.log
+# The sink enforces a per-row size cap. Cloud-init logs from systems that
+# build from source (e.g. compiling Hyrise/WarehousePG, pulling Spark
+# tarballs, apt-installing build-essential) can run to hundreds of MB,
+# and pushing the full file fails with a "Too large" reject — losing the
+# whole log including the diagnostic tail we actually care about. Send
+# the first 100 KB + last 900 KB of each file: the head captures the
+# `System name:` / `Proprietary:` / `Tuned:` / `Tags:` lines emitted
+# before benchmark.sh runs (a plain tail -c 1000000 dropped these on
+# build-from-source systems), and the tail still captures bench output,
+# tracebacks, and final readiness/timing lines.
+send_log() {
+    local f="$1" size
+    size=$(stat -c%s "$f" 2>/dev/null || echo 0)
+    if [ "$size" -le 1000000 ]; then
+        curl --max-time 300 ${RESULTS_URL} --data-binary @"$f"
+    else
+        { head -c 100000 "$f"
+          printf '\n...[%d bytes truncated]...\n' "$((size - 1000000))"
+          tail -c 900000 "$f"
+        } | curl --max-time 300 ${RESULTS_URL} --data-binary @-
+    fi
+}
+send_log log
+send_log /var/log/cloud-init-output.log
 
 shutdown now

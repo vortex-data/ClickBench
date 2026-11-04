@@ -1,0 +1,33 @@
+#!/bin/bash
+# Reads a SQL query from stdin, runs it via datafusion-cli using create.sql
+# to define the hits view, then the query.
+# Stdout: query result.
+# Stderr: query runtime in fractional seconds on the last line.
+# Exit non-zero on error.
+set -e
+
+DF=arrow-datafusion/target/release/datafusion-cli
+
+query=$(cat)
+tmp=$(mktemp /tmp/datafusion.XXXXXX.sql)
+err=$(mktemp /tmp/datafusion.XXXXXX.err)
+trap 'rm -f "$tmp" "$err"' EXIT
+printf '%s\n' "$query" > "$tmp"
+
+# datafusion-cli exits 0 even when a query errors: it prints to stderr and leaves
+# only create.sql's "Elapsed" on stdout, which the driver would mis-record as the
+# query time. Treat any stderr output (or a nonzero exit) as failure.
+out=$("$DF" -f create.sql "$tmp" 2>"$err") && status=0 || status=$?
+
+if [ "$status" -ne 0 ] || [ -s "$err" ]; then
+    cat "$err" >&2
+    printf '%s\n' "$out" >&2
+    exit 1
+fi
+
+# Print everything that's not an "Elapsed" timing line as the result.
+printf '%s\n' "$out" | grep -v 'Elapsed' || true
+
+# datafusion-cli prints `... Elapsed X.YYY seconds.` for each statement; the
+# last one is for the actual query.
+printf '%s\n' "$out" | awk '/Elapsed/ { e = $2 } END { print e }' >&2
